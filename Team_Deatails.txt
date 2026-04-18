@@ -2,3 +2,4 @@ Abdulhadi Bitar 900212558
 Mohamed Medhat 900224108
 Youssef Sherif 900212359
 Mohamed Awad 900184084
+This project was completed through the equal and shared contribution of all team members. From the initial KiCad schematic wiring to the final line-follower logic and Wi-Fi debugging, every phase was handled as a group. We functioned as a single unit to ensure that the electrical and mechanical systems were perfectly synchronized.
