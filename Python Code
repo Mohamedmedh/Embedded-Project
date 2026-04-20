@@ -1,0 +1,369 @@
+import socket, threading, time
+import tkinter as tk
+from tkinter import scrolledtext, messagebox
+
+HOST = "192.168.4.1"
+PORT = 8888
+
+# Direction vectors: 0=North  1=East  2=South  3=West
+DX = [ 0,  1,  0, -1]
+DY = [-1,  0,  1,  0]
+
+# Pacman arc start angles in tkinter canvas coords
+# tkinter: 0=right, 90=DOWN (y increases down), 180=left, 270=UP
+# mouth faces the direction of travel
+PACMAN_ANGLE = {0: 270, 1: 0, 2: 90, 3: 180}   # North East South West
+
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Maze Robot")
+        self.root.configure(bg="#0d0d1a")
+        self.root.resizable(False, False)
+
+        self.sock    = None
+        self.reading = False
+        self.path    = ""
+
+        self.pts        = [(0, 0)]   # grid positions visited
+        self.px         = 0
+        self.py         = 0
+        self.pdir       = 1          # start facing East
+        self.mouth_open = True
+        self.move_count = 0
+
+        self._build_ui()
+        self._tick()                 # start animation loop
+
+    # ── UI ────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        BG   = "#0d0d1a"
+        BG2  = "#13132b"
+        FG   = "#cdd6f4"
+        DIM  = "#3a3a5c"
+        mono = ("Courier New", 10)
+        bold = ("Courier New", 10, "bold")
+
+        top = tk.Frame(self.root, bg=BG, pady=8)
+        top.pack(fill="x", padx=14)
+
+        tk.Label(top, text="HOST:PORT", fg=DIM, bg=BG, font=mono).pack(side="left")
+        self.addr = tk.Entry(top, width=22, font=mono, bg=BG2, fg=FG,
+                             insertbackground=FG, relief="flat",
+                             highlightthickness=1, highlightbackground="#2222cc")
+        self.addr.insert(0, f"{HOST}:{PORT}")
+        self.addr.pack(side="left", padx=(4, 10), ipady=4)
+
+        self.btn_conn = tk.Button(top, text="CONNECT", command=self.toggle_connect,
+                                  font=bold, bg="#89b4fa", fg="#000",
+                                  relief="flat", padx=10, pady=3, cursor="hand2")
+        self.btn_conn.pack(side="left")
+
+        self.btn_start = tk.Button(top, text="▶ START", command=self.send_start,
+                                   state="disabled", font=bold, bg="#f9e2af", fg="#000",
+                                   relief="flat", padx=10, pady=3, cursor="hand2")
+        self.btn_start.pack(side="left", padx=(8, 0))
+
+        self.lbl_conn = tk.Label(top, text="● offline", fg="#f38ba8", bg=BG, font=mono)
+        self.lbl_conn.pack(side="left", padx=12)
+
+        mid = tk.Frame(self.root, bg=BG)
+        mid.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+
+        # Canvas
+        self.CW = self.CH = 380
+        cf = tk.Frame(mid, bg="#1a1a44", bd=2)
+        cf.pack(side="left", padx=(0, 12))
+        self.canvas = tk.Canvas(cf, width=self.CW, height=self.CH,
+                                bg="#000011", highlightthickness=0)
+        self.canvas.pack()
+
+        # Right panel
+        rp = tk.Frame(mid, bg=BG)
+        rp.pack(side="left", fill="both", expand=True)
+
+        sf = tk.Frame(rp, bg=BG2, pady=8)
+        sf.pack(fill="x", pady=(0, 10))
+        self.v_state = self._stat(sf, "STATE", "IDLE",  "#89dceb")
+        self.v_moves = self._stat(sf, "MOVES", "0",     "#FFD700")
+        self.v_run2  = self._stat(sf, "RUN 2", "—",     "#a6e3a1")
+
+        tk.Label(rp, text="LIVE LOG", fg=DIM, bg=BG, font=mono).pack(anchor="w")
+        self.log = scrolledtext.ScrolledText(
+            rp, height=18, width=32, font=mono,
+            bg="#000022", fg=FG, insertbackground=FG,
+            relief="flat", state="disabled")
+        self.log.pack(fill="both", expand=True)
+        self.log.tag_config("move",   foreground="#a6e3a1")
+        self.log.tag_config("status", foreground="#89dceb")
+        self.log.tag_config("path",   foreground="#f9e2af")
+        self.log.tag_config("done",   foreground="#cba6f7")
+        self.log.tag_config("err",    foreground="#f38ba8")
+
+        bot = tk.Frame(self.root, bg=BG)
+        bot.pack(fill="x", padx=14, pady=(0, 12))
+
+        pf = tk.Frame(bot, bg=BG2, pady=8)
+        pf.pack(fill="x", pady=(0, 8))
+        tk.Label(pf, text="OPTIMIZED PATH:", fg=DIM, bg=BG2, font=mono).pack(anchor="w", padx=10)
+        self.v_path = tk.StringVar(value="— waiting —")
+        tk.Label(pf, textvariable=self.v_path,
+                 font=("Courier New", 13, "bold"),
+                 fg="#FFD700", bg=BG2, wraplength=660).pack(anchor="w", padx=10, pady=(3,0))
+        self.v_pathlen = tk.StringVar(value="")
+        tk.Label(pf, textvariable=self.v_pathlen, fg=DIM, bg=BG2, font=mono).pack(anchor="w", padx=10)
+
+        self.btn_run2 = tk.Button(
+            bot, text="▶   START RUN 2  —  SEND OPTIMAL PATH",
+            command=self.send_run2, state="disabled",
+            font=("Courier New", 11, "bold"), bg="#a6e3a1", fg="#000",
+            relief="flat", height=2, cursor="hand2")
+        self.btn_run2.pack(fill="x")
+
+    def _stat(self, parent, title, value, color):
+        f = tk.Frame(parent, bg="#13132b", padx=12)
+        f.pack(side="left", expand=True)
+        tk.Label(f, text=title, fg="#3a3a5c", bg="#13132b",
+                 font=("Courier New", 8)).pack()
+        var = tk.StringVar(value=value)
+        tk.Label(f, textvariable=var, fg=color, bg="#13132b",
+                 font=("Courier New", 13, "bold")).pack()
+        return var
+
+    # ── Visualization ─────────────────────────────────────────
+
+    def _tick(self):
+        """Animation loop — flips pacman mouth and redraws every 300ms."""
+        self.mouth_open = not self.mouth_open
+        self._redraw()
+        self.root.after(300, self._tick)
+
+    def _redraw(self):
+        C = self.canvas
+        C.delete("all")
+
+        W, H = self.CW, self.CH
+        PAD  = 45
+
+        # ── Scale to fit all visited points ──────────────────
+        xs = [p[0] for p in self.pts]
+        ys = [p[1] for p in self.pts]
+        minX, maxX = min(xs), max(xs)
+        minY, maxY = min(ys), max(ys)
+        spanX = max(maxX - minX, 1)
+        spanY = max(maxY - minY, 1)
+        cell  = min((W - PAD*2) / spanX,
+                    (H - PAD*2) / spanY,
+                    55)                  # max 55px per cell
+        cell  = max(cell, 14)            # min 14px per cell
+
+        # Centre the path in the canvas
+        ox = W/2 - ((minX + maxX) / 2) * cell
+        oy = H/2 - ((minY + maxY) / 2) * cell
+
+        def sc(gx, gy):
+            return ox + gx * cell, oy + gy * cell
+
+        # ── Draw trail ────────────────────────────────────────
+        for i in range(len(self.pts) - 1):
+            x1, y1 = sc(*self.pts[i])
+            x2, y2 = sc(*self.pts[i + 1])
+            thick = max(int(cell * 0.55), 10)
+            thin  = max(int(cell * 0.22), 4)
+            C.create_line(x1, y1, x2, y2, fill="#10104a",
+                          width=thick, capstyle="round", joinstyle="round")
+            C.create_line(x1, y1, x2, y2, fill="#2233bb",
+                          width=thin,  capstyle="round", joinstyle="round")
+
+        # ── Start marker ──────────────────────────────────────
+        sx, sy = sc(*self.pts[0])
+        r0 = max(int(cell * 0.25), 6)
+        C.create_oval(sx-r0, sy-r0, sx+r0, sy+r0, fill="#a6e3a1", outline="")
+        C.create_text(sx, sy - r0 - 8, text="START",
+                      fill="#a6e3a1", font=("Courier New", 7, "bold"))
+
+        # ── Pacman at current position ────────────────────────
+        px, py = sc(self.px, self.py)
+        pr = max(int(cell * 0.38), 10)
+
+        angle = PACMAN_ANGLE[self.pdir]
+        if self.mouth_open:
+            start  = angle + 25
+            extent = 310
+        else:
+            start  = 0
+            extent = 359   # full circle (closed mouth)
+
+        C.create_arc(px - pr, py - pr, px + pr, py + pr,
+                     start=start, extent=extent,
+                     fill="#FFD700", outline="")
+
+        # Eye — offset perpendicular to travel direction
+        eye_off = {0: (pr//3, -pr//2),   # North: right and up
+                   1: (pr//3, -pr//2),   # East:  right and up
+                   2: (-pr//3, pr//2),   # South: left and down
+                   3: (-pr//3, -pr//2)}  # West:  left and up
+        ex, ey = eye_off[self.pdir]
+        er = max(pr // 5, 2)
+        C.create_oval(px+ex-er, py+ey-er, px+ex+er, py+ey+er,
+                      fill="#111", outline="")
+
+        # ── Move counter ──────────────────────────────────────
+        C.create_text(W//2, H - 8, text=f"MOVES: {self.move_count}",
+                      fill="#2a2a55", font=("Courier New", 9))
+
+    def add_move(self, move):
+        """Called on each MOVE: message. Steps pacman forward then turns."""
+        nx = self.px + DX[self.pdir]
+        ny = self.py + DY[self.pdir]
+        self.pts.append((nx, ny))
+        self.px, self.py = nx, ny
+
+        if   move == 'L': self.pdir = (self.pdir + 3) % 4
+        elif move == 'R': self.pdir = (self.pdir + 1) % 4
+        elif move == 'U': self.pdir = (self.pdir + 2) % 4
+        # 'S' keeps same direction
+
+        self.move_count += 1
+        self.v_moves.set(str(self.move_count))
+        self._redraw()
+
+    # ── Connection ────────────────────────────────────────────
+
+    def toggle_connect(self):
+        if self.sock: self.disconnect()
+        else:         self.connect()
+
+    def connect(self):
+        raw = self.addr.get().strip()
+        try:
+            host, port = raw.rsplit(":", 1)
+            port = int(port)
+        except Exception:
+            messagebox.showerror("Error", "Format: 192.168.4.1:8888")
+            return
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect((host, port))
+            s.settimeout(1)
+            self.sock    = s
+            self.reading = True
+            self.lbl_conn.config(text=f"● {host}:{port}", fg="#a6e3a1")
+            self.btn_conn.config(text="DISCONNECT", bg="#f38ba8")
+            self.btn_start.config(state="normal")
+            threading.Thread(target=self._read_loop, daemon=True).start()
+            self._log(f"Connected to {host}:{port}", "status")
+            self._log("Click START when car is at the start line", "status")
+        except Exception as e:
+            messagebox.showerror("Connect failed",
+                f"Cannot reach {raw}\n\n{e}\n\n"
+                "• Is laptop on WiFi 'MazeRobot'?\n• Is D1 Mini powered?")
+
+    def disconnect(self):
+        self.reading = False
+        self.btn_start.config(state="disabled")
+        if self.sock:
+            try: self.sock.close()
+            except: pass
+            self.sock = None
+        self.lbl_conn.config(text="● offline", fg="#f38ba8")
+        self.btn_conn.config(text="CONNECT", bg="#89b4fa")
+        self._log("Disconnected.", "err")
+
+    # ── Socket reader ─────────────────────────────────────────
+
+    def _read_loop(self):
+        buf = b""
+        while self.reading:
+            try:
+                data = self.sock.recv(256)
+                if not data: break
+                buf += data
+                while b'\n' in buf:
+                    line, buf = buf.split(b'\n', 1)
+                    msg = line.decode("utf-8", errors="ignore").strip()
+                    if msg:
+                        self.root.after(0, self._handle, msg)
+            except socket.timeout:
+                continue
+            except Exception:
+                time.sleep(0.1)
+
+    def _handle(self, msg):
+        if msg.startswith("MOVE:"):
+            move = msg[5:].strip()
+            names = {"L": "Left", "R": "Right", "S": "Straight", "U": "U-Turn"}
+            self._log(f"[{self.move_count+1:02d}] {names.get(move, move)}", "move")
+            self.add_move(move)
+            self.v_state.set("EXPLORING")
+
+        elif msg.startswith("PATH:"):
+            self.path = msg[5:].strip()
+            self.v_path.set(self.path)
+            self.v_pathlen.set(f"{len(self.path)} moves  (optimized)")
+            self.btn_run2.config(state="normal")
+            self.v_state.set("WAITING")
+            self._log("━" * 24, "path")
+            self._log("MAZE SOLVED!", "path")
+            self._log(f"Path: {self.path}", "path")
+            self._log("Click  START RUN 2", "path")
+            self._log("━" * 24, "path")
+
+        elif msg.startswith("DONE:"):
+            self.v_state.set("DONE ✓")
+            self.v_run2.set("✓")
+            self.btn_run2.config(state="disabled")
+            self._log("RUN 2 COMPLETE!", "done")
+
+        elif msg.startswith("STATUS:"):
+            self._log(msg[7:], "status")
+
+        else:
+            self._log(msg, "status")
+
+    def _log(self, text, tag="status"):
+        self.log.config(state="normal")
+        self.log.insert("end", f"[{time.strftime('%H:%M:%S')}] {text}\n", tag)
+        self.log.see("end")
+        self.log.config(state="disabled")
+
+    # ── Commands ──────────────────────────────────────────────
+
+    def _send(self, data):
+        if not self.sock: return
+        try:
+            self.sock.sendall(data.encode())
+        except Exception as e:
+            self._log(f"Send error: {e}", "err")
+
+    def send_start(self):
+        self._send("START\n")
+        self.btn_start.config(state="disabled")
+        self.v_state.set("EXPLORING")
+        self._log("START sent — car is exploring!", "status")
+
+    def send_run2(self):
+        if not self.path:
+            messagebox.showerror("Error", "No path received yet.")
+            return
+        self._send(f"RUN:{self.path}\n")
+        self.btn_run2.config(state="disabled")
+        self.v_state.set("RUNNING")
+        self.v_run2.set("…")
+        self._log(f"RUN: {self.path}", "path")
+        # Reset pacman for run 2
+        self.pts        = [(0, 0)]
+        self.px         = self.py = 0
+        self.pdir       = 1
+        self.move_count = 0
+        self.v_moves.set("0")
+        self._redraw()
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
