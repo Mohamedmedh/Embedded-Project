@@ -1,0 +1,17 @@
+** Drc report for embedded_phase2.kicad_pcb **
+** Created on 2026-05-13T22:12:44+0300 **
+
+** Found 2 DRC violations **
+[via_dangling]: Via is not connected or connected on only one layer
+    Local override; warning
+    @(222.0000 mm, 40.4000 mm): Via [GND] on F.Cu - B.Cu
+[silk_overlap]: Silkscreen overlap
+    Rule: board setup constraints silk; warning
+    @(201.7500 mm, 67.7100 mm): Segment of D4 on F.Silkscreen
+    @(202.7500 mm, 68.4000 mm): Reference field of D4
+
+** Found 0 unconnected pads **
+
+** Found 0 Footprint errors **
+
+** End of Report **
